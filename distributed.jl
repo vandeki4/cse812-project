@@ -6,46 +6,112 @@ using Compose
 push!(LOAD_PATH, "./")
 using SparseEdmondsKarp
 
-function constrained_q_match(bipartite_graph, q::Int, bundle_lookup)
+function approximate_q_matching(bipartite_graph, q::Int, bundle_lookup)
   n::Int = nv(bipartite_graph) / 2
-  flow_graph = SimpleDiGraph(3n+2)
   
   I::Vector{Int} = []
   J::Vector{Int} = []
   V::Vector{Int} = []
 
   for edge in edges(bipartite_graph)
-    # If we have already added an edge, don't add it to the sparse flow capacity a second time.
-    # add_edge is smart enough to tell us if we already have this edge
-    if (add_edge!(flow_graph, edge))
-      push!(I, src(edge))
-      push!(J, dst(edge))
-      push!(V, 1)
-    end
-    if (add_edge!(flow_graph, dst(edge), 3n+2))
-      push!(I, dst(edge))
-      push!(J, 3n+2)
-      push!(V, q)
-    end
-
-    e = (2n + bundle_lookup(src(edge)), src(edge))
-    if (add_edge!(flow_graph, e[1], e[2]))
-      push!(I, e[1])
-      push!(J, e[2])
-      push!(V, 1)
-    end
-    if (add_edge!(flow_graph, 3n+1, e[1]))
-      push!(I, 3n+1)
-      push!(J, e[1])
-      push!(V, q)
+    push!(I, src(edge))
+    push!(J, dst(edge))
+    push!(V, 1)
+  end
+  capacity_matrix = sparse(I, J, V, 2n, 2n)
+  flow = convert(SparseMatrixCSC{Float64,Int64}, capacity_matrix)
+  fill!(flow.nzval, 1 / ne(bipartite_graph))
+  
+  capacity = zeros(Int, nv(bipartite_graph))
+  for vert in vertices(bipartite_graph)
+    if vert > n
+      # in Q, right side
+      capacity[vert] = max(indegree(bipartite_graph, vert), q)
+    else
+      # in U, left side
+      capacity[vert] = max(1, outdegree(bipartite_graph, vert))
     end
   end
+  bundle_capacity = zeros(Int, n)
+  for v in 1:n
+    if bundle_lookup(v) != 0
+      bundle_capacity[bundle_lookup(v)] += 1
+    end
+  end
+  for v in 1:n
+    if bundle_lookup(v) != 0
+      bundle_capacity[bundle_lookup(v)] = max(bundle_capacity[bundle_lookup(v)], q)
+    end
+  end
+
+  doubled = true
+  while doubled
+    flow_through_vert = zeros(Float64, nv(bipartite_graph))
+    for e in edges(bipartite_graph)
+      flow_through_vert[src(e)] += flow[src(e), dst(e)]
+      flow_through_vert[dst(e)] += flow[src(e), dst(e)]
+    end
+
+    # Whether U nodes have been requested to double
+    request_double::Vector{Tuple{Int, Int}} = []
+    
+    for e in edges(bipartite_graph)
+      # if not full
+      if flow_through_vert[dst(e)] < (1/8) * capacity[dst(e)]
+        push!(request_double, (src(e), dst(e)))
+      end
+    end
+
+    # flow through a bundle. uses representative parent id, so need n
+    bundle_flow = zeros(Float64, n)
+    # U nodes
+    for v in 1:n
+      if bundle_lookup(v) != 0
+        bundle_flow[bundle_lookup(v)] += flow_through_vert[v]
+      end
+    end
+    doubled = false
+    for edge in request_double
+      if bundle_lookup(edge[1]) == 0
+        continue
+      end
+      if bundle_flow[bundle_lookup(edge[1])] < (1/8) * bundle_capacity[bundle_lookup(edge[1])]
+        doubled = true
+        flow[edge[1], edge[2]] *= 2
+      end
+    end
+  end
+
+  S = Set(Iterators.filter(
+    e -> flow[src(e), dst(e)] > rand(),
+    edges(bipartite_graph)
+  ))
+
+  # remove extras...
+  # do not need n, can get away with fewer since there are fewer branches
+  bundle_incidence = zeros(Int, n)
+  uq_incidence = zeros(Int, 2n)
+
+  result::Vector{Edge} = []
   
-  capacity_matrix = sparse(I, J, V, 3n+2, 3n+2)
-  return SparseEdmondsKarp.edmonds_karp_sparse_impl(flow_graph, 3n+1, 3n+2, capacity_matrix)
+  for edge in S
+    if uq_incidence[src(edge)] < 1 && 
+      uq_incidence[dst(edge)] < q && 
+      bundle_incidence[bundle_lookup(src(edge))] < q
+      push!(result, edge)
+    end
+
+    uq_incidence[src(edge)] += 1
+    uq_incidence[dst(edge)] += 1
+    bundle_incidence[bundle_lookup(src(edge))] += 1
+  end
+
+  println(result)
+
+  return result
 end
 
-function improve!(graph, tree, high_degree, low_degree)
+function improve!(graph, tree, q, high_degree, low_degree)
   retain_vertex = degree(tree) .< high_degree
   vertices_to_retain = filter(n -> n > 0, retain_vertex .* eachindex(retain_vertex))
   println("Retaining $(size(vertices_to_retain, 1)) vertices")
@@ -143,59 +209,70 @@ function improve!(graph, tree, high_degree, low_degree)
   original_edge_from_imp = sparse(I,J,V, nv(graph), nv(graph))
 
   # Todo: change to the distributed flow alg. described in the paper
-  total, flow = constrained_q_match(imp_graph, 1, bundle_id_of_vertex)
-  for (i,j,f) in zip(findnz(flow)...)
-    if f <= 0
-      continue
-    end
+  matches = approximate_q_matching(imp_graph, q, bundle_id_of_vertex)
+  for edge in matches
+    dest = dst(edge) - nv(graph)
+    # part of the constrained q matching
+    source = original_edge_from_imp[src(edge), dest]
 
-    if i <= nv(graph)
-      dest = j - nv(graph)
-      # part of the constrained q matching
-      source = original_edge_from_imp[i, dest]
-
-      # TODO: entering & exiting
-      rem_edge!(tree, bundle_id_of_vertex(source), representative_vertex_of_leafbranch(source))
-      if !(add_edge!(tree, source, dest))
-        println("Broken! tried to add already existing edge!")
-      end
+    # TODO: entering & exiting
+    rem_edge!(tree, bundle_id_of_vertex(source), representative_vertex_of_leafbranch(source))
+    if !(add_edge!(tree, source, dest))
+      println("Broken! tried to add already existing edge!")
     end
   end
 end
 
-g = erdos_renyi(12, 0.3)
+function prog!(tree, q)
+  k = Δ(tree)
+  b(j) = k + 1 - j * q
+
+  low_degree = k - 2 * 1;
+  
+  improve!(g, tree, q, k, low_degree)
+end
+
+function mdst(graph, save_graphs=false)
+  tree = SimpleGraphFromIterator(prim_mst(g))
+
+  q = 2^max(0, floor(Int, log2(Δ(tree)) - 2))
+  h = 1
+  i = 0
+
+  while q >= 1
+    i += 1
+
+    prog!(tree, q)
+
+    if save_graphs
+      draw(SVG("tree-$i.svg", 16cm, 16cm), gplot(tree, locs_x, locs_y, nodelabel=labels))
+    end
+
+    n_components = size(connected_components(tree), 1)
+    if n_components != 1
+      println("FAULT: MDST is no longer a tree!")
+      # break
+    end
+
+    q = Int(floor(q/2))
+  end
+
+  return tree
+end
+
+g = erdos_renyi(512, 0.1)
 
 #g = Graph(2048, 4096) 
 
 n_components = size(connected_components(g), 1)
-
 println("Original Graph Components: $n_components")
 
-tree = SimpleGraphFromIterator(kruskal_mst(g))
+tree = mdst(g)
 
 locs_x, locs_y = spring_layout(g)
 labels = nv(g) <= 32 ? (1:nv(g)) : (nothing)
 draw(SVG("graph.svg", 16cm, 16cm), gplot(g, locs_x, locs_y, nodelabel=labels))
-draw(SVG("tree-0.svg", 16cm, 16cm), gplot(tree, locs_x, locs_y, nodelabel=labels))
+draw(SVG("tree-final.svg", 16cm, 16cm), gplot(tree, locs_x, locs_y, nodelabel=labels))
 
-high_degree = maximum(degree(tree))
 
-#q = 2^(floor(Int, log2(high_degree) - 2)
-#h = 1
 
-for i in 1:10 # q >= 0:
-  high_degree = maximum(degree(tree))
-
-  low_degree = high_degree - 2 * 1;
-  
-  improve!(g, tree, high_degree, low_degree)
-  print("$high_degree -> ")
-
-  draw(SVG("tree-$i.svg", 16cm, 16cm), gplot(tree, locs_x, locs_y, nodelabel=labels))
-
-  n_components = size(connected_components(tree), 1)
-  if n_components != 1
-    println("FAULT: MDST is no longer a tree!")
-    break
-  end
-end
