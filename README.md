@@ -8,6 +8,6 @@ Contributors: Brenden, Zach
 
 singlethread.jl: Single-threaded MDST algorithm implementation as outlined in
 http://viswa.engin.umich.edu/wp-content/uploads/sites/169/2016/12/5.pdf
-Creator: Ian
+Contributors: Ian
 
-results.doc: Various preliminary test results
+results.xslx: Various preliminary test results
