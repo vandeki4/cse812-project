@@ -48,10 +48,15 @@ function approximate_q_matching(bipartite_graph, q::Int, bundle_lookup)
   doubled = true
   while doubled
     flow_through_vert = zeros(Float64, nv(bipartite_graph))
-    for e in edges(bipartite_graph)
-      flow_through_vert[src(e)] += flow[src(e), dst(e)]
-      flow_through_vert[dst(e)] += flow[src(e), dst(e)]
+
+    for (i,j,v) in zip(findnz(flow)...)
+      flow_through_vert[i] += v 
+      flow_through_vert[j] += v
     end
+    #for e in edges(bipartite_graph)
+    #  flow_through_vert[src(e)] += flow[src(e), dst(e)]
+    #  flow_through_vert[dst(e)] += flow[src(e), dst(e)]
+    #end
 
     # Whether U nodes have been requested to double
     request_double::Vector{Tuple{Int, Int}} = []
@@ -183,7 +188,7 @@ function improve!(graph, tree, q, γ)
   V::Vector{Int} = []
 
   for edge in g_sub_tree
-    is_good = !is_high_edge(tree, edge, low_degree) # TODO: is this leaf_branches? Might be tree
+    is_good = !is_high_edge(branches_graph, edge, low_degree) # TODO: is this leaf_branches? Might be tree
 
     # in different branches
     is_good &= branch_lookup[src(edge)] != branch_lookup[dst(edge)]
@@ -213,8 +218,12 @@ function improve!(graph, tree, q, γ)
 
   matches = approximate_q_matching(imp_graph, q, bundle_id_of_vertex)
 
-  filtered_match = []
-  while size(filtered_match, 1) < floor(Int, size(matches, 1) / 8)
+  if size(matches, 1) == 0
+    return 0
+  end
+
+  filtered_match::Vector{Edge} = []
+  while size(filtered_match, 1) < (size(matches, 1) / 8)
     filtered_match = []
     leaf_coins = rand(size(branch_components, 1)) .> 0.5
 
@@ -231,6 +240,8 @@ function improve!(graph, tree, q, γ)
     # part of the constrained q matching
     source = original_edge_from_imp[src(edge), dest]
 
+    @assert is_vert_of_leafbranch(source)
+
     if !has_edge(tree, source, dest) && has_edge(tree, bundle_id_of_vertex(source), representative_vertex_of_leafbranch(source))
       add_edge!(tree, source, dest)
       rem_edge!(tree, bundle_id_of_vertex(source), representative_vertex_of_leafbranch(source))
@@ -240,7 +251,7 @@ function improve!(graph, tree, q, γ)
   return size(matches, 1)
 end
 
-function prog!(graph, tree, q, h_hat)
+function prog!(graph, tree, q, h_hat, i, save_graphs, func)
   k = Δ(tree)
 
   δ = 1 - 1/(log(nv(tree))^0.25)
@@ -268,44 +279,47 @@ function prog!(graph, tree, q, h_hat)
     end
     
     k = Δ(tree)
-    # print("$k -> ")
+    print("$k -> ")
     imp_size = improve!(graph, tree, q, b(j, k, q))
 
     if (k >= last_val)
       last_val = k
       staleness += 1
     else
+      i += 1
+      if save_graphs
+        func(i, tree)
+      end
       staleness = 0
       last_val = k
     end
 
     Π = δ * q * sum(degree(tree) .>= b(j, k, q)) / (8c)
-    Π += staleness / 5;
+    # Π += staleness / 30;
 
     if (imp_size <= Π)
       h_hat = max(h_hat, b(j, k, q))
     end
     
   end
-  return h_hat
+  return (h_hat, i)
 end
 
 function mdst(graph, save_graphs=false, func=nothing)
   tree = SimpleGraphFromIterator(prim_mst(graph))
+
+  if save_graphs
+    func(0, tree)
+  end
 
   q = 2^max(0, floor(Int, log2(Δ(tree)) - 2))
   h_hat = 1
   i = 0
 
   while q >= 1
-    h_hat = prog!(graph, tree, q, h_hat)
+    h_hat, i = prog!(graph, tree, q, h_hat, i, save_graphs, func)
 
-    i += 1
     q = Int(floor(q/2))
-
-    if save_graphs
-      func(i, tree)
-    end
 
     n_components = size(connected_components(tree), 1)
     if n_components != 1
@@ -322,22 +336,29 @@ end
 
 
 function main()
-  #g = erdos_renyi(16, 0.5)
+  g = erdos_renyi(16, 0.5)
 
-  g = Graph(2048, 4096)
+  #g = Graph(2048, 4096)
 
   n_components = size(connected_components(g), 1)
   println("Original Graph Components: $n_components")
 
-  locs_x, locs_y = spring_layout(g)
-  labels = nv(g) <= 32 ? (1:nv(g)) : (nothing)
+  locs_x = zeros(nv(g))
+  locs_y = zeros(nv(g))
+  labels = nothing
+  if nv(g) <= 24
+    locs_x, locs_y = circular_layout(g)
+    labels = 1:nv(g)
+  else
+    locs_x, locs_y = spring_layout(g)
+  end
   draw(SVG("graph.svg", 16cm, 16cm), gplot(g, locs_x, locs_y, nodelabel=labels))
 
   function save(i, tree)
     draw(SVG("tree-$i.svg", 16cm, 16cm), gplot(tree, locs_x, locs_y, nodelabel=labels))
   end
 
-  tree = mdst(g, true, save)
+  tree = mdst(g, false, save)
   println(Δ(tree))
 
   draw(SVG("tree-final.svg", 16cm, 16cm), gplot(tree, locs_x, locs_y, nodelabel=labels))
@@ -352,3 +373,5 @@ function benchmark()
 
   return (t64, t128, t256, t512, t2048)
 end
+
+main()
