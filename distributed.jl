@@ -2,6 +2,7 @@ using LightGraphs
 using SparseArrays
 using GraphPlot
 using Compose
+using BenchmarkTools
 
 push!(LOAD_PATH, "./")
 using SparseEdmondsKarp
@@ -95,6 +96,9 @@ function approximate_q_matching(bipartite_graph, q::Int, bundle_lookup)
   result::Vector{Edge} = []
   
   for edge in S
+    if bundle_lookup(src(edge)) == 0
+      continue
+    end
     if uq_incidence[src(edge)] < 1 && 
       uq_incidence[dst(edge)] < q && 
       bundle_incidence[bundle_lookup(src(edge))] < q
@@ -106,15 +110,15 @@ function approximate_q_matching(bipartite_graph, q::Int, bundle_lookup)
     bundle_incidence[bundle_lookup(src(edge))] += 1
   end
 
-  println(result)
-
   return result
 end
 
-function improve!(graph, tree, q, high_degree, low_degree)
+function improve!(graph, tree, q, γ)
+  high_degree = γ
+  low_degree = γ - 2q
+  
   retain_vertex = degree(tree) .< high_degree
   vertices_to_retain = filter(n -> n > 0, retain_vertex .* eachindex(retain_vertex))
-  println("Retaining $(size(vertices_to_retain, 1)) vertices")
 
   # Remove edges adjacent to high degree vertices
   is_high_edge(graph, edge, deg) = degree(graph, src(edge)) >= deg || degree(graph, dst(edge)) >= deg
@@ -179,8 +183,7 @@ function improve!(graph, tree, q, high_degree, low_degree)
   V::Vector{Int} = []
 
   for edge in g_sub_tree
-    @assert !has_edge(tree, edge)
-    is_good = !is_high_edge(branches_graph, edge, low_degree) # TODO: is this leaf_branches? Might be tree
+    is_good = !is_high_edge(tree, edge, low_degree) # TODO: is this leaf_branches? Might be tree
 
     # in different branches
     is_good &= branch_lookup[src(edge)] != branch_lookup[dst(edge)]
@@ -208,71 +211,144 @@ function improve!(graph, tree, q, high_degree, low_degree)
   # Reverse lookup, so we can go from an imp graph edge back to the edge that originally created it
   original_edge_from_imp = sparse(I,J,V, nv(graph), nv(graph))
 
-  # Todo: change to the distributed flow alg. described in the paper
   matches = approximate_q_matching(imp_graph, q, bundle_id_of_vertex)
-  for edge in matches
+
+  filtered_match = []
+  while size(filtered_match, 1) < floor(Int, size(matches, 1) / 8)
+    filtered_match = []
+    leaf_coins = rand(size(branch_components, 1)) .> 0.5
+
+    for match in matches
+      if leaf_coins[branch_lookup[src(match)]] == false ||
+        leaf_coins[branch_lookup[dst(match) - nv(graph)]] == true
+        push!(filtered_match, match)
+      end
+    end
+  end
+
+  for edge in filtered_match
     dest = dst(edge) - nv(graph)
     # part of the constrained q matching
     source = original_edge_from_imp[src(edge), dest]
 
-    # TODO: entering & exiting
-    rem_edge!(tree, bundle_id_of_vertex(source), representative_vertex_of_leafbranch(source))
-    if !(add_edge!(tree, source, dest))
-      println("Broken! tried to add already existing edge!")
+    if !has_edge(tree, source, dest) && has_edge(tree, bundle_id_of_vertex(source), representative_vertex_of_leafbranch(source))
+      add_edge!(tree, source, dest)
+      rem_edge!(tree, bundle_id_of_vertex(source), representative_vertex_of_leafbranch(source))
     end
   end
+
+  return size(matches, 1)
 end
 
-function prog!(tree, q)
+function prog!(graph, tree, q, h_hat)
   k = Δ(tree)
-  b(j) = k + 1 - j * q
 
-  low_degree = k - 2 * 1;
+  δ = 1 - 1/(log(nv(tree))^0.25)
+  c = 1.1
+  τ = round(2 / (1 - δ))
+  b(j, k, q) = k + 1 - j * q
+
+  t = ceil((k + 1 - h_hat) / q) + 1
+  if t <= 0
+    t = 1
+  end
   
-  improve!(g, tree, q, k, low_degree)
+  j = -1
+  first = true
+
+  staleness = 0
+  last_val = 0
+
+  while first || b(j, k, q) > h_hat
+    first = false
+
+    j = argmax([sum(degree(tree) .>= b(s, k, q)) / (τ^s) for s in 1:t])
+    if j > floor(k/q - 2)
+      j = floor(k/q - 2)
+    end
+    
+    k = Δ(tree)
+    # print("$k -> ")
+    imp_size = improve!(graph, tree, q, b(j, k, q))
+
+    if (k >= last_val)
+      last_val = k
+      staleness += 1
+    else
+      staleness = 0
+      last_val = k
+    end
+
+    Π = δ * q * sum(degree(tree) .>= b(j, k, q)) / (8c)
+    Π += staleness / 5;
+
+    if (imp_size <= Π)
+      h_hat = max(h_hat, b(j, k, q))
+    end
+    
+  end
+  return h_hat
 end
 
-function mdst(graph, save_graphs=false)
-  tree = SimpleGraphFromIterator(prim_mst(g))
+function mdst(graph, save_graphs=false, func=nothing)
+  tree = SimpleGraphFromIterator(prim_mst(graph))
 
   q = 2^max(0, floor(Int, log2(Δ(tree)) - 2))
-  h = 1
+  h_hat = 1
   i = 0
 
   while q >= 1
-    i += 1
+    h_hat = prog!(graph, tree, q, h_hat)
 
-    prog!(tree, q)
+    i += 1
+    q = Int(floor(q/2))
 
     if save_graphs
-      draw(SVG("tree-$i.svg", 16cm, 16cm), gplot(tree, locs_x, locs_y, nodelabel=labels))
+      func(i, tree)
     end
 
     n_components = size(connected_components(tree), 1)
     if n_components != 1
-      println("FAULT: MDST is no longer a tree!")
+      println("Fault: n_components = $n_components")
       # break
     end
-
-    q = Int(floor(q/2))
+    if ne(tree) != nv(tree) - 1
+      println("Fault: $(ne(tree)) != $(nv(tree) - 1)")
+    end
   end
 
   return tree
 end
 
-g = erdos_renyi(512, 0.1)
 
-#g = Graph(2048, 4096) 
+function main()
+  #g = erdos_renyi(16, 0.5)
 
-n_components = size(connected_components(g), 1)
-println("Original Graph Components: $n_components")
+  g = Graph(2048, 4096)
 
-tree = mdst(g)
+  n_components = size(connected_components(g), 1)
+  println("Original Graph Components: $n_components")
 
-locs_x, locs_y = spring_layout(g)
-labels = nv(g) <= 32 ? (1:nv(g)) : (nothing)
-draw(SVG("graph.svg", 16cm, 16cm), gplot(g, locs_x, locs_y, nodelabel=labels))
-draw(SVG("tree-final.svg", 16cm, 16cm), gplot(tree, locs_x, locs_y, nodelabel=labels))
+  locs_x, locs_y = spring_layout(g)
+  labels = nv(g) <= 32 ? (1:nv(g)) : (nothing)
+  draw(SVG("graph.svg", 16cm, 16cm), gplot(g, locs_x, locs_y, nodelabel=labels))
 
+  function save(i, tree)
+    draw(SVG("tree-$i.svg", 16cm, 16cm), gplot(tree, locs_x, locs_y, nodelabel=labels))
+  end
 
+  tree = mdst(g, true, save)
+  println(Δ(tree))
 
+  draw(SVG("tree-final.svg", 16cm, 16cm), gplot(tree, locs_x, locs_y, nodelabel=labels))
+end
+
+function benchmark()
+  t64 = @benchmark mdst(erdos_renyi(64, 1000))
+  t128 = @benchmark mdst(erdos_renyi(128, 4000))
+  t256 = @benchmark mdst(erdos_renyi(256, 16000))
+  t512 = @benchmark mdst(erdos_renyi(512, 64000))
+  t2048 = @benchmark mdst(erdos_renyi(512, 128000))
+
+  return (t64, t128, t256, t512, t2048)
+end
