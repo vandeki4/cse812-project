@@ -10,6 +10,7 @@
 
 using LightGraphs
 using GraphPlot
+using Compose
 
 #---Function reduce---
 #Implements one iteration of the MDST algorithm
@@ -18,16 +19,16 @@ using GraphPlot
 #\return Bool: Whether or node a change was found and made
 function reduce!(G, origin)::Bool
     for u in vertices(G)
-        for v in vertices(G)
-            for w in vertices(G)
-                #Condtion 1: Disjoint nodes
-                if u != v && u != w && v != w
-                    #Condition 2: Edge between u and v
-                    if has_edge(origin, v, w)
-                        #Condition 3: deg(U) > Threshold
-                        if degree(G, u) >= Δ(G) - log2(nv(G))
-                            #Condition 4: deg(v) <= deg(u) - 2, deg(w) <= deg(u) - 2
-                            if degree(G, v) <= degree(G, u) - 2 && degree(G, w) <= degree(G, u) - 2
+        #Condition 1: deg(U) > Threshold
+        if degree(G, u) >= Δ(G) - log2(nv(G))
+            for v in vertices(G)
+                #Condition 2: deg(v) <= deg(u) - 2 and u, v are disjoint
+                if degree(G, v) <= degree(G, u) - 2 && v != u
+                    for w in vertices(G)
+                        #Condition 3: deg(w) <= deg(u) - 2 and (w, v), (w, u) are disjoint
+                        if degree(G, w) <= degree(G, u) - 2 && u != w && v != w
+                            #Condition 4: Edge between u and v
+                            if has_edge(origin, v, w)
                                 #Condtion 5: u lies on the path from v - w
                                 path = a_star(G, v, w)
                                 onPath = false #Indicator variable
@@ -64,8 +65,9 @@ end
 
 #---Phase 0: Start Program Execution---
 start = time()
-numVertices = 250
-numEdges = numVertices * 3
+numVertices = 16
+numEdges = numVertices * 2
+printGraphs = false
 
 #---Phase 1: Graph Creation---
 origin = Graph(numVertices, numEdges)
@@ -80,33 +82,45 @@ origin = Graph(numVertices, numEdges)
 # add_edge!(origin, 1, 10)
 # add_edge!(origin, 10, 11)
 # add_edge!(origin, 6, 8)
-#Plot Orginial Graph
-#gplot(origin, nodelabel = 1:nv(G))
 
+locs_x, locs_y = spring_layout(origin) #Keep consistent placement
+labels = nv(origin) <= 32 ? (1:nv(origin)) : (nothing) #Remove lablels if > 32
+if printGraphs == true
+    draw(SVG("graph-origin.svg", 16cm, 16cm), gplot(origin, locs_x, locs_y, nodelabel=labels))
+end
 #---Phase 2: Generate MST---
+#Graph plot parameters and origin graph
+
 mstEdges = prim_mst(origin)
 G = Graph(nv(origin))
 for edge in mstEdges
     add_edge!(G, edge)
 end
-#Plot MST
-#gplot(G, nodelabel = 1:nv(G))
+mstMax = Δ(G)
 
 #---Phase 3: Generate MDST---
+graphNum = 1
 moreWork = true
 while moreWork
     println("\nMax Degree of G: " * string(Δ(G)))
+
+    if printGraphs == true
+        draw(SVG("graph-$graphNum.svg", 16cm, 16cm), gplot(G, locs_x, locs_y, nodelabel=labels))
+    end
+    global graphNum += 1
+
 
     #If reduce returned false, there weren't any changes made and we are done
     if reduce!(G, origin) == false
         global moreWork = false
     end
+
+
 end
 
 #---Phase 4: Report Results---
 #Report total runtime benchmark
 elapsed = time() - start
 println("\nElapsed Time: " * string(elapsed))
-println("Max Degree Reduced from " * string(Δ(origin)) * " to " * string(Δ(G)))
-#Plot MDST
-gplot(G, nodelabel = 1:nv(G))
+println("Max Degree Reduced from " * string(mstMax) * " to " * string(Δ(G)))
+println("Performed " * string(graphNum - 1) * " total improvements.")
