@@ -42,6 +42,8 @@ function run_test(g)
     st_time = @benchmark singlethread.mdst(g)
     ds_time = @benchmark distributed.mdst(g)
 
+    print("Vertices,")
+    print("Edges,")
     print("Single-Threaded Time,")
     print("Multi-Threaded Time,")
     
@@ -51,6 +53,8 @@ function run_test(g)
     print("Multi-Threaded End Degree (var),")
     print("Multi-Threaded Correct Rate\n")
 
+    print("$(nv(g)),")
+    print("$(ne(g)),")
     print("$(time(st_time)),")
     print("$(time(ds_time)),")
     
