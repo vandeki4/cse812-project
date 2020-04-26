@@ -1,3 +1,5 @@
+module distributed
+
 using LightGraphs
 using SparseArrays
 using GraphPlot
@@ -10,21 +12,22 @@ using SparseEdmondsKarp
 function approximate_q_matching(bipartite_graph, q::Int, bundle_lookup)
   n::Int = nv(bipartite_graph) / 2
   
-  I::Vector{Int} = []
-  J::Vector{Int} = []
-  V::Vector{Int} = []
+  I::Array{Int, 1} = zeros(ne(bipartite_graph))
+  J::Array{Int, 1} = zeros(ne(bipartite_graph))
+  V::Array{Int, 1} = zeros(ne(bipartite_graph))
 
-  for edge in edges(bipartite_graph)
-    push!(I, src(edge))
-    push!(J, dst(edge))
-    push!(V, 1)
+  for (i ,edge) in enumerate(edges(bipartite_graph))
+    I[i] = src(edge)
+    J[i] = dst(edge)
+    V[i] = 1
   end
+  
   capacity_matrix = sparse(I, J, V, 2n, 2n)
   flow = convert(SparseMatrixCSC{Float64,Int64}, capacity_matrix)
   fill!(flow.nzval, 1 / ne(bipartite_graph))
   
   capacity = zeros(Int, nv(bipartite_graph))
-  for vert in vertices(bipartite_graph)
+  Threads.@threads for vert in vertices(bipartite_graph)
     if vert > n
       # in Q, right side
       capacity[vert] = max(indegree(bipartite_graph, vert), q)
@@ -33,6 +36,7 @@ function approximate_q_matching(bipartite_graph, q::Int, bundle_lookup)
       capacity[vert] = max(1, outdegree(bipartite_graph, vert))
     end
   end
+
   bundle_capacity = zeros(Int, n)
   for v in 1:n
     if bundle_lookup(v) != 0
@@ -49,24 +53,47 @@ function approximate_q_matching(bipartite_graph, q::Int, bundle_lookup)
   while doubled
     flow_through_vert = zeros(Float64, nv(bipartite_graph))
 
-    for (i,j,v) in zip(findnz(flow)...)
-      flow_through_vert[i] += v 
-      flow_through_vert[j] += v
+    # cannot be done parallel without syncing
+
+    for j in 1:size(flow, 2)
+      for i_ind in flow.colptr[j]:(flow.colptr[j+1]-1)
+        i = flow.rowval[i_ind]
+        v = flow.nzval[i_ind]
+        flow_through_vert[i] += v 
+        flow_through_vert[j] += v
+      end
     end
+
+    #for (i,j,v) in zip(findnz(flow)...)
+    #  flow_through_vert[i] += v 
+    #  flow_through_vert[j] += v 
+    #end
     #for e in edges(bipartite_graph)
     #  flow_through_vert[src(e)] += flow[src(e), dst(e)]
     #  flow_through_vert[dst(e)] += flow[src(e), dst(e)]
     #end
 
     # Whether U nodes have been requested to double
-    request_double::Vector{Tuple{Int, Int}} = []
-    
-    for e in edges(bipartite_graph)
-      # if not full
-      if flow_through_vert[dst(e)] < (1/8) * capacity[dst(e)]
-        push!(request_double, (src(e), dst(e)))
+    request_double = Array{Tuple{Int, Int}, 1}(undef, length(flow.nzval))
+    request_count = 0
+
+    for j in 1:size(flow, 2)
+      for i_ind in flow.colptr[j]:(flow.colptr[j+1]-1)
+        i = flow.rowval[i_ind]
+        v = flow.nzval[i_ind]
+        if flow_through_vert[j] < (1/8) * capacity[j]
+          request_count += 1
+          request_double[request_count] = (i, j)
+        end
       end
     end
+
+    # for (i,j,v) in zip(findnz(flow)...)
+    #   if flow_through_vert[j] < (1/8) * capacity[j]
+    #     request_count += 1
+    #     request_double[request_count] = (i, j)
+    #   end
+    # end
 
     # flow through a bundle. uses representative parent id, so need n
     bundle_flow = zeros(Float64, n)
@@ -76,8 +103,10 @@ function approximate_q_matching(bipartite_graph, q::Int, bundle_lookup)
         bundle_flow[bundle_lookup(v)] += flow_through_vert[v]
       end
     end
+
     doubled = false
-    for edge in request_double
+    Threads.@threads for i in 1:request_count
+      edge = request_double[i]
       if bundle_lookup(edge[1]) == 0
         continue
       end
@@ -139,7 +168,8 @@ function improve!(graph, tree, q, γ)
   # Fast vertex -> branch lookup
   branch_components = connected_components(branches_graph)
   branch_lookup = zeros(Int, nv(graph))
-  for (i, comp) in enumerate(branch_components)
+  Threads.@threads for i in eachindex(branch_components)
+    comp = branch_components[i]
     for vert in comp
       branch_lookup[vert] = i
     end
@@ -181,6 +211,7 @@ function improve!(graph, tree, q, γ)
     edges(graph)
   )
 
+
   imp_graph = SimpleDiGraph(2 * nv(graph))
   
   I::Vector{Int} = []
@@ -194,6 +225,10 @@ function improve!(graph, tree, q, γ)
     is_good &= branch_lookup[src(edge)] != branch_lookup[dst(edge)]
     # with at least one being a leaf branch
     is_good &= is_vert_of_leafbranch(src(edge)) || is_vert_of_leafbranch(dst(edge))
+
+
+    # TODO: add_edge! is actually fairly slow.
+    # Ideally this would be parallel.
     if (is_good)
       # for each of the two vertices of this good edge, check to see if it is in a leaf branch.
       # if it is, it contributes to the imp graph. Note that this also decides incomming/outgoing edges.
@@ -255,8 +290,8 @@ function prog!(graph, tree, q, h_hat, i, save_graphs, func)
   k = Δ(tree)
 
   δ = 1 - 1/(log(nv(tree))^0.25)
-  c = 1.1
-  τ = round(2 / (1 - δ))
+  c = 1.0001
+  τ = 2 / (1 - δ)
   b(j, k, q) = k + 1 - j * q
 
   t = ceil((k + 1 - h_hat) / q) + 1
@@ -279,7 +314,7 @@ function prog!(graph, tree, q, h_hat, i, save_graphs, func)
     end
     
     k = Δ(tree)
-    print("$k -> ")
+    # print("$k -> ")
     imp_size = improve!(graph, tree, q, b(j, k, q))
 
     if (k >= last_val)
@@ -291,16 +326,16 @@ function prog!(graph, tree, q, h_hat, i, save_graphs, func)
         func(i, tree)
       end
       staleness = 0
-      last_val = k
+      last_val = Δ(tree)
     end
 
     Π = δ * q * sum(degree(tree) .>= b(j, k, q)) / (8c)
     # Π += staleness / 30;
-
+    
     if (imp_size <= Π)
       h_hat = max(h_hat, b(j, k, q))
     end
-    
+
   end
   return (h_hat, i)
 end
@@ -323,7 +358,7 @@ function mdst(graph, save_graphs=false, func=nothing)
 
     n_components = size(connected_components(tree), 1)
     if n_components != 1
-      println("Fault: n_components = $n_components")
+      # println("Fault: n_components = $n_components")
       # break
     end
     if ne(tree) != nv(tree) - 1
@@ -364,7 +399,7 @@ function main()
   draw(SVG("tree-final.svg", 16cm, 16cm), gplot(tree, locs_x, locs_y, nodelabel=labels))
 end
 
-function benchmark()
+function benchmark_test()
   t64 = @benchmark mdst(erdos_renyi(64, 1000))
   t128 = @benchmark mdst(erdos_renyi(128, 4000))
   t256 = @benchmark mdst(erdos_renyi(256, 16000))
@@ -374,4 +409,14 @@ function benchmark()
   return (t64, t128, t256, t512, t2048)
 end
 
-main()
+# results = benchmark()
+# println("Threads: $(Threads.nthreads())")
+# t64 = @benchmark mdst(erdos_renyi(512, 128000))
+# println(time(t64))
+
+# using ProfileView
+
+# mdst(erdos_renyi(64, 1000))
+# @profview mdst(erdos_renyi(512, 128000))
+
+end
