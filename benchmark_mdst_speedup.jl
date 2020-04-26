@@ -21,8 +21,15 @@ function make_connected_graph(verts, edges, max_tries = 100)
     return g
 end
 
-function run_test(g)
-    ds_time = @benchmark distributed.mdst(g)
+function run_test(verts, edges)
+    n = 25
+    times = []
+    for i in 1:n
+        # g = make_connected_graph(verts, edges)
+        ds_time = @benchmark distributed.mdst(g) setup=(g = make_connected_graph($verts, $edges))
+ 
+        push!(times, time(ds_time))
+    end
 
     print("Vertices,")
     print("Edges,")
@@ -30,11 +37,10 @@ function run_test(g)
     print("Multi-Threaded Time\n")
 
 
-    print("$(nv(g)),")
-    print("$(ne(g)),")
+    print("$verts,")
+    print("$edges,")
     print("$(Threads.nthreads()),")
-    print("$(time(ds_time))\n")
+    print("$(sum(times) / length(times))\n")
 end
 
-g = make_connected_graph(verts, edges)
-run_test(g)
+run_test(verts, edges)
