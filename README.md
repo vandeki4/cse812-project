@@ -34,3 +34,6 @@ They each output a single row of CSV output, including the header.
 - [`results.xlsx`](results.xlsx): Various preliminary test results. We do not use these in the final report, they are here for the sake of completeness.
 - [`benchmark_mdst_speedup.csv`](benchmark_mdst_speedup.csv): Comparison of singlethreaded and distributed algorithm, run on HPCC
 - [`benchmark_both.csv`](benchmark_both.csv): Results of distributed algorithm scaling on MSU HPCC
+
+## Note
+Lastly a link to this Github repo is accessible at [https://github.com/vandeki4/cse812-project](https://github.com/vandeki4/cse812-project)
